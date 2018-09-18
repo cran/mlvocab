@@ -14,19 +14,19 @@
 // You should have received a copy of the GNU General Public License along with
 // mlvocab. If not, see <http://www.gnu.org/licenses/>.
 
- 
+
 #ifndef MAGISTRAL_VOCAB_H
 #define MAGISTRAL_VOCAB_H
 
 #include "common.h"
+#include "corpus.h"
 #include "TripletMatrix.h"
+#include "PriSecMatrix.h"
 #include "hash.h"
 #include "ngram.h"
 #include <algorithm>
 #include <unordered_set>
-
-
-/// VOCAB CODE
+#include <omp.h>
 
 class VocabEntry {
  public:
@@ -35,27 +35,32 @@ class VocabEntry {
   string term;
   size_t n;      // total count in corpus
   size_t ndocs;  // total count of docs
+
+  bool operator < (const VocabEntry& other) const {
+    return (n > other.n);
+  }
 };
 
 class Vocab {
-  
+
  private:
 
   int ngram_min;
   int ngram_max;
   string ngram_sep;
+  string regex;
   int ndocs;
   int nbuckets;
   int nuniqterms;
   /* bool chargram; */
+  hashmap<string, uint_fast32_t> vocabix;
 
-  sparse_hash_map<string, uint_fast32_t> vocabix;
   vector<VocabEntry> vocab;
 
  public:
 
   Vocab(const DataFrame& df) {
-    
+
     const IntegerVector& ngram = df.attr("ngram");
     ngram_min = ngram[0];
     ngram_max = ngram[1];
@@ -63,9 +68,8 @@ class Vocab {
     this->ndocs = ndocs[0];
     const IntegerVector& ubuckets = df.attr("nbuckets");
     this->nbuckets = ubuckets[0];
-    /* const LogicalVector& chargram = df.attr("chargram"); */
-    /* this->chargram = chargram[0]; */
     const CharacterVector& ngram_sep = df.attr("ngram_sep");
+    this->regex = translate_separators(df.attr("regex"));
     this->ngram_sep = as<string>(ngram_sep[0]);
 
     const CharacterVector& terms = df["term"];
@@ -74,44 +78,94 @@ class Vocab {
 
     size_t N = df.nrow();
 
+    // populate the vocabix
     for (size_t i = 0; i < N; i++) {
       const char* termc = terms[i];
       if (!is_bkt_name(termc)) {
-        // core terms only 
+        // Core terms only. Unknown buckets are generated on the fly when needed
+        // and we don't allow updating of pruned vocabs.
         insert_entry(string(termc), term_count[i], doc_count[i]);
       }
     }
 
   };
- 
-  void rebucket_unknowns(const DataFrame& df, size_t nbuckets) {
-    const IntegerVector& rubuckets = df.attr("nbuckets");
+
+  
+  // Retrieve in DF form
+
+  DataFrame df() {
+    size_t N = vocab.size();
+    CharacterVector terms(N);
+    IntegerVector term_counts(N);
+    IntegerVector doc_counts(N);
+
+    size_t i = 0;
+    for(const VocabEntry& ve : vocab) {
+      // Output UTF8 which is not correct if input encoding is non-ascii or
+      // non-utf8. But we explicitly support UTF-8 only.
+      terms[i] = Rf_mkCharCE(ve.term.c_str(), CE_UTF8);
+      term_counts[i] = ve.n;
+      doc_counts[i] = ve.ndocs;
+      i++;
+    }
+
+    DataFrame out = DataFrame::create(_["term"] = terms,
+                                      _["term_count"] = term_counts,
+                                      _["doc_count"] = doc_counts,
+                                      _["stringsAsFactors"] = false);
+    out.attr("ngram") = IntegerVector::create(ngram_min, ngram_max);
+    out.attr("document_count") = IntegerVector::create(ndocs);
+    out.attr("nbuckets") = IntegerVector::create(nbuckets);
+    out.attr("ngram_sep") = CharacterVector::create(ngram_sep);
+    if (regex != "")
+      out.attr("regex") = CharacterVector::create(regex);
+    out.attr("class") = CharacterVector::create("mlvocab_vocab", "data.frame");
+
+    return out;
+  }
+
+  
+  /// INTERNAL UTILITIES
+
+  const char* separators() {
+    return this->regex.c_str();
+  }
+
+  void sort() {
+    vector<size_t> perm = sorting_permutation(vocab);
+    apply_permutation_in_place(vocab, perm);
+  }
+
+  void rehash_unknowns(const DataFrame& orig_vocabdf, size_t nbuckets) {
+
+    const IntegerVector& rubuckets = orig_vocabdf.attr("nbuckets");
     size_t ubuckets = rubuckets[0];
 
     if (ubuckets > 0 && ubuckets != nbuckets)
-      Rf_error("Trying to rehash a vocab with a different number of buckets");
-    
+      Rf_error("Cannot rehash the vocab with a different number of buckets");
+
     if (nbuckets > 0) {
 
-      const CharacterVector& terms = df["term"];
-      const IntegerVector& term_count = df["term_count"];
-      const IntegerVector& doc_count = df["doc_count"];
-      size_t N = df.nrow();
+      const CharacterVector& terms = orig_vocabdf["term"];
+      const IntegerVector& term_count = orig_vocabdf["term_count"];
+      const IntegerVector& doc_count = orig_vocabdf["doc_count"];
+      size_t N = orig_vocabdf.nrow();
 
+      // 1) put all bkt names at the end of the vocab first
       for (size_t bkt = 1; bkt <= nbuckets; bkt++) {
         insert_entry(bkt_name(bkt), 0, 0);
       }
-      
-      // 2) rehash all "new" unknowns
-      shm_string_iter vit;
+
+      // 2) add all unknowns at the end
+      hashmap_string_iter vit;
       for (size_t i = 0; i < N; i++) {
         const char* termc = terms[i];
         string term(termc);
         if (is_bkt_name(termc)) {
-          // insert unknown counts
+          // 2.a) existing unknowns
           insert_entry(term, term_count[i], doc_count[i]);
         } else {
-          // rehash new unknowns
+          // 2.b) new unknowns
           vit = vocabix.find(term);
           if (vit == vocabix.end()) {
             uint_fast32_t bkt = murmur3hash(term) % nbuckets + 1;
@@ -124,40 +178,11 @@ class Vocab {
     }
   }
 
-  DataFrame df() {
-    size_t N = vocab.size();
-    CharacterVector terms(N);
-    IntegerVector term_counts(N);
-    IntegerVector doc_counts(N);
-
-    size_t i = 0;
-    for(const VocabEntry& ve : vocab) {
-      // output UTF8 which is not correct if input encoding is non-ascii or
-      // non-utf8. Consider saving encoding (and maybe strlen).
-      terms[i] = Rf_mkCharCE(ve.term.c_str(), CE_UTF8);
-      term_counts[i] = ve.n;
-      doc_counts[i] = ve.ndocs;
-      i++;
-    }
-    
-    DataFrame out = DataFrame::create(_["term"] = terms,
-                                      _["term_count"] = term_counts,
-                                      _["doc_count"] = doc_counts,
-                                      _["stringsAsFactors"] = false);
-    out.attr("ngram") = IntegerVector::create(ngram_min, ngram_max);
-    out.attr("document_count") = IntegerVector::create(ndocs);
-    out.attr("nbuckets") = IntegerVector::create(nbuckets);
-    out.attr("ngram_sep") = CharacterVector::create(ngram_sep);
-    out.attr("class") = CharacterVector::create("mlvocab_vocab", "data.frame");
-    
-    return out;
-  }
-
   
   /// INSERT
-  
+
   void insert_entry(const string& term, size_t n = 1, size_t ndocs = 1) {
-    shm_string_iter vit = vocabix.find(term);
+    hashmap_string_iter vit = vocabix.find(term);
     if (vit == vocabix.end()) {
       size_t id = vocab.size();
       vocabix.insert(make_pair(term, id));
@@ -167,9 +192,9 @@ class Vocab {
       vocab[vit->second].ndocs += ndocs;
     }
   }
-  
+
   void insert_doc(const vector<string>& doc) {
-    shm_string_iter vit;
+    hashmap_string_iter vit;
     unordered_set<size_t> termset;
     size_t id;
     for (const string& term : doc) {
@@ -190,19 +215,19 @@ class Vocab {
     ndocs++;
   }
 
-  void insert_corpus(const ListOf<const CharacterVector>& corpus) {
-    vector<string> vec;
+  void insert_corpus(const Corpus& corpus) {
     vector<string> ngram_vec;
-    for(const CharacterVector& doc : corpus) {
-      ngram_vec = wordgrams(as<vector<string>>(doc), ngram_min, ngram_max, ngram_sep);
+    R_xlen_t CN = corpus.size();
+    for(R_xlen_t i = 0; i < CN; i++) {
+      ngram_vec = wordgrams(corpus[i], ngram_min, ngram_max, ngram_sep);
       insert_doc(ngram_vec);
     }
   }
-  
+
   
   /// EMBEDDING
-  
-  NumericMatrix embed_vocab(NumericMatrix& embeddings, bool by_row, 
+
+  NumericMatrix prune_embeddings(NumericMatrix& embeddings, bool by_row,
                             int nbuckets, int max_per_bucket) {
     // embedding as columns for efficiency
     size_t nembs = vocabix.size() + nbuckets;
@@ -210,7 +235,7 @@ class Vocab {
     size_t nallembs = by_row ? embeddings.nrow() : embeddings.ncol();
 
     CharacterVector embnames = by_row ? rownames(embeddings) : colnames(embeddings);
-    sparse_hash_map<string, uint_fast32_t> embmap;
+    hashmap<string, uint_fast32_t> embmap;
     uint_fast32_t i = 0;
     for (auto nm : embnames) {
       const string term = as<string>(nm);
@@ -221,7 +246,7 @@ class Vocab {
     missing_terms.reserve(vocab.size() / 10);
     NumericMatrix out(esize, nembs);
 
-    shm_string_iter eit;  
+    hashmap_string_iter eit;
     string term;
     for (size_t i = 0; i < vocab.size(); i++) {
       const string& term = vocab[i].term;
@@ -272,48 +297,88 @@ class Vocab {
 
   
   /// IX SEQUENCE GENERATORS
-  
-  ListOf<IntegerVector> corpus2ixseq(const ListOf<const CharacterVector>& corpus,
-                                     bool keep_unknown, int nbuckets, bool doreverse) {
-    size_t CN = corpus.size();
-    vector<vector<int>> out;
-    out.reserve(CN);
-    for (size_t i = 0; i < CN; i++) {
-      const CharacterVector& doc(corpus[i]);
-      size_t ND = doc.size();
-      vector<int> v;
-      v.reserve(ND);
-      for (auto el : doc) {
-        push_ix_maybe(v, as<string>(el), keep_unknown, nbuckets);
-      }
-      if (doreverse)
-        reverse(v.begin(), v.end());
-      out.push_back(v);
+
+  inline vector<int> doc2ixseq(const vector<string> doc, bool keep_unknown, int nbuckets, bool doreverse) {
+    size_t ND = doc.size();
+    vector<int> v;
+    v.reserve(ND);
+    for (auto el : doc) {
+      push_ix_maybe(v, el, keep_unknown, nbuckets);
     }
-    return wrap(out);
+    if (doreverse)
+      reverse(v.begin(), v.end());
+    return v;
   }
-  
-  IntegerMatrix corpus2ixmat(const ListOf<const CharacterVector>& corpus,
+
+  SEXP corpus2ixseq(const Corpus& corpus, bool keep_unknown, int nbuckets, bool doreverse) {
+    size_t CN = corpus.size();
+    SEXP out = PROTECT(Rf_allocVector(VECSXP, CN));
+    for (size_t i = 0; i < CN; i++) {
+      vector<int> docix = doc2ixseq(corpus[i], keep_unknown, nbuckets, doreverse);
+      SEXP rdocix = Rf_allocVector(INTSXP, docix.size());
+      std::copy(docix.begin(), docix.end(), INTEGER(rdocix));
+      SET_VECTOR_ELT(out, i, rdocix);
+    }
+    Rf_setAttrib(out, R_NamesSymbol, corpus.names());
+    UNPROTECT(1);
+    return out;
+  }
+
+  DataFrame corpus2ixdf(const Corpus& corpus, bool keep_unknown, int nbuckets,
+                        bool doreverse, bool asfactor) {
+    R_xlen_t CN = corpus.size();
+    vector<int> ixes;
+    ixes.reserve(CN*3);
+    vector<int> reps(CN);
+    for (R_xlen_t i = 0; i < CN; i++) {
+      vector<int> ix = doc2ixseq(corpus[i], keep_unknown, nbuckets, doreverse);
+      ixes.insert(ixes.end(), ix.begin(), ix.end());
+      reps[i] = ix.size();
+    }
+    bool no_id = corpus.id() == R_NilValue;
+    SEXP outdf;
+    if (no_id) {
+      // use integer ids if no names
+      SEXP obj = PROTECT(Rf_allocVector(INTSXP, CN));
+      int* pt = INTEGER(obj);
+      for (R_xlen_t i = 0; i < CN; i++)
+        pt[i] = i+1;
+      outdf = PROTECT(replicate_df(obj, reps, ixes.size()));
+      UNPROTECT(1); // obj
+    } else {
+      outdf = PROTECT(replicate_df(corpus.id(), reps, ixes.size()));
+    }
+    SEXP ix  = wrap(ixes);
+    SET_VECTOR_ELT(outdf, Rf_xlength(outdf) - 1, ix);
+    if (asfactor) {
+      Rf_setAttrib(ix, R_LevelsSymbol, vocab_names(nbuckets));
+      Rf_setAttrib(ix, R_ClassSymbol, Rf_mkString("factor"));
+    }
+    UNPROTECT(1); // outdf
+    return outdf;
+  }
+
+  IntegerMatrix corpus2ixmat(const Corpus& corpus,
                              size_t maxlen, bool pad_right, bool trunc_right,
                              bool keep_unknown, int nbuckets, bool doreverse) {
-    
+
     size_t CN = corpus.size();
     IntegerMatrix out(CN, maxlen);
-    vector<int>v;
-    CharacterVector::iterator beg, end;
-    
+    vector<int> v;
+
     for (size_t i = 0; i < CN; i++) {
       v.clear();
       v.reserve(maxlen + 1);
-      const CharacterVector& doc(corpus[i]);
+
+      const vector<string> doc = corpus[i];
 
       if (trunc_right) {
         for (auto it = doc.begin(); it != doc.end() && v.size() < maxlen; ++it) {
-          push_ix_maybe(v, as<string>(*it), keep_unknown, nbuckets);
+          push_ix_maybe(v, *it, keep_unknown, nbuckets);
         }
       } else {
         for (auto it = doc.end(); it-- != doc.begin() && v.size() < maxlen;) {
-          push_ix_maybe(v, as<string>(*it), keep_unknown, nbuckets);
+          push_ix_maybe(v, *it, keep_unknown, nbuckets);
         }
       }
 
@@ -333,7 +398,7 @@ class Vocab {
           copy_backward(v.rbegin(), v.rend(), row.end());
       }
     }
-    
+    rownames(out) = corpus.names();
     return out;
   }
 
@@ -341,72 +406,90 @@ class Vocab {
   /// DTM/TCM
 
   template <MatrixType mattype>
-  SEXP term_matrix(const ListOf<CharacterVector>& corpus, int nbuckets, bool dtm,
-                   const int ngram_min, const int ngram_max,
+  SEXP term_matrix(const Corpus& corpus,
+                   const int nbuckets,
+                   const bool dtm,
+                   const int ngram_min,
+                   const int ngram_max,
                    const Nullable<NumericVector>& term_weights) {
 
     check_ngram_limits(ngram_min, ngram_max);
 
-    TripletMatrix* tm = new TripletMatrix();
-    int& doc_dim = dtm ? tm->nrow : tm->ncol; 
+    size_t CN = corpus.size();
+    PriSecMatrix mat(CN);
 
-    size_t csize = corpus.size();
-    shm_string_iter vit;
-    
-    for (size_t i = 0; i < csize; i++) {
-      const vector<string> doc = wordgrams(as<vector<string>>(corpus[i]), ngram_min, ngram_max, ngram_sep);
+    /* omp_set_num_threads(8); */
+
+#pragma omp parallel for
+    for (size_t i = 0; i < CN; i++) {
+      hashmap_string_iter vit;
+      const vector<string> doc = wordgrams(corpus[i], ngram_min, ngram_max, ngram_sep);
+      mat.alloc(i, doc.size());
       for (const string& term : doc) {
         vit = vocabix.find(term);
         // Matrix classes are 0-based indexed
         if (vit == vocabix.end()) {
-          Rprintf("not found: %s\n", term.c_str());
           if (nbuckets > 0) {
-            tm->add(doc_dim, murmur3hash(term) % nbuckets + vocab.size(), 1.0, dtm);
-          } 
+            mat.set(i, murmur3hash(term) % nbuckets + vocab.size(), 1.0);
+          }
         } else {
-          tm->add(doc_dim, vit->second, 1.0, dtm);
+          mat.set(i, vit->second, 1.0);
         }
       }
-      doc_dim++;
+      mat.sort_and_compact(i);
     }
 
+    // term_weights is currently not used
+    if (term_weights.isNotNull())
+      mat.apply_weight(term_weights.get(), MatrixDimType::SECONDARY);
+
+    SEXP out;
     if (dtm) {
-      if (term_weights.isNotNull())
-        tm->apply_weight(term_weights.get(), MatrixDimType::COL);
-      SEXP out = tm->get(mattype, corpus.attr("names"), vocab_names(nbuckets));
-      Rf_setAttrib(out, Rf_mkString("mlvocab_dtm"), Rf_ScalarLogical(1));
-      return out;
+      if (mattype == MatrixType::DGC) {
+        mat.transpose();
+        out = mat.get(mattype, vocab_names(nbuckets), corpus.names(), false, false);
+      } else {
+        out = mat.get(mattype, corpus.names(), vocab_names(nbuckets), false, true);
+      }
     } else {
-      if (term_weights.isNotNull())
-        tm->apply_weight(term_weights.get(), MatrixDimType::ROW);
-      SEXP out = tm->get(mattype, vocab_names(nbuckets), corpus.attr("names"));
-      Rf_setAttrib(out, Rf_mkString("mlvocab_dtm"), Rf_ScalarLogical(0));
-      return out;
+      if (mattype == MatrixType::DGR) {
+        mat.transpose();
+        out = mat.get(mattype, vocab_names(nbuckets), corpus.names(), false, true);
+      } else {
+        out = mat.get(mattype, corpus.names(), vocab_names(nbuckets), false, false);
+      }
     }
+    Rf_setAttrib(out, Rf_mkString("mlvocab_dtm"), Rf_ScalarLogical(dtm));
+    return out;
   }
 
   template <MatrixType mattype>
-  SEXP term_cooccurrence_matrix(const ListOf<CharacterVector>& corpus, const int nbuckets,
-                                const size_t window_size, const vector<double>& window_weights,
-                                const int ngram_min, const int ngram_max,
+  SEXP term_cooccurrence_matrix(const Corpus& corpus,
+                                const int nbuckets,
+                                const size_t window_size,
+                                const vector<double>& window_weights,
+                                const int ngram_min,
+                                const int ngram_max,
                                 const ContextType context,
                                 const Nullable<NumericVector>& term_weights) {
 
     check_ngram_limits(ngram_min, ngram_max);
-    
-    TripletMatrix* tm = new TripletMatrix();
-    size_t csize = corpus.size();
-    shm_string_iter vit;
+
+    size_t CN = corpus.size();
+    size_t TN = vocab.size() + nbuckets;
+    TripletMatrix tm(TN, TN);
+    hashmap_string_iter vit;
     string term;
     vector<double> weights = ngram_weights(window_weights, ngram_min, ngram_max);
     size_t wsize = weights.size();
-    
-    for (size_t d = 0; d < csize; d++) {
-      
-      const vector<string> doc = wordgrams(as<vector<string>>(corpus[d]), ngram_min, ngram_max, ngram_sep);
+
+    for (size_t d = 0; d < CN; d++) {
+
+      const vector<string> doc = wordgrams(corpus[d], ngram_min, ngram_max, ngram_sep);
       size_t dsize = doc.size();
       uint32_t iix, jix;
       for (size_t i = 0; i < dsize; i++) {
+
         // (i)-term outer loop
         term = doc[i];
         vit = vocabix.find(term);
@@ -436,30 +519,133 @@ class Vocab {
           switch(context) {
            case ContextType::SYMMETRIC:
              // populating upper triangle
-             if (iix < jix) tm->add(iix, jix, weights[w]); 
-             else tm->add(jix, iix, weights[w]); 
+             if (iix < jix) tm.add(iix, jix, weights[w]);
+             else tm.add(jix, iix, weights[w]);
              break;
            case ContextType::RIGHT:
-             tm->add(iix, jix, weights[w]); break;
+             tm.add(iix, jix, weights[w]); break;
            case ContextType::LEFT:
-             tm->add(jix, iix, weights[w]); break;
+             tm.add(jix, iix, weights[w]); break;
           }
         }
       }
     }
 
     if (term_weights.isNotNull()) {
-      tm->apply_weight(term_weights.get(), MatrixDimType::BOTH);
+      tm.apply_weight(term_weights.get(), MatrixDimType::BOTH);
     }
     const CharacterVector& names = vocab_names(nbuckets);
-    return tm->get(mattype, names, names, context == ContextType::SYMMETRIC);
-    
+    return tm.get(mattype, names, names, context == ContextType::SYMMETRIC);
+  }
+
+  CharacterVector vocab_names(uint32_t nbuckets) {
+    CharacterVector out(vocab.size() + nbuckets);
+    size_t i = 0;
+    for (const VocabEntry& ve : vocab) {
+      out[i] = Rf_mkChar(ve.term.c_str());
+      i++;
+    }
+    string tmpname = "";
+    for (uint32_t bkt = 1; bkt <= nbuckets; bkt++) {
+      out[i] = bkt_name(bkt);
+      i++;
+    }
+    return out;
   }
 
  private: // utils
-  
+
+  void set_df_attrs(SEXP df, const CharacterVector& names) {
+    // NB: assumes non-empty df
+    Rf_setAttrib(df, R_ClassSymbol, Rf_mkString("data.frame"));
+    Rf_setAttrib(df, R_NamesSymbol, names);
+    SEXP rnames = IntegerVector::create(NA_INTEGER, Rf_xlength(VECTOR_ELT(df, 0)));
+    Rf_setAttrib(df, R_RowNamesSymbol, rnames);
+  }
+
+  
+  // Could have been done at R level but it's obnoxiously slow and greedy.
+
+  SEXP replicate_df(SEXP obj, const vector<int>& reps, R_xlen_t N) {
+    // allocate full output DF here but don't initialize the last column
+    if (Rf_inherits(obj, "data.frame")) {
+      // obj is the full input df
+      R_xlen_t len = Rf_xlength(obj);
+      SEXP df = PROTECT(Rf_allocVector(VECSXP, len));
+      for (R_xlen_t i = 0; i < len - 1; i++) {
+        SET_VECTOR_ELT(df, i, replicate_sexp(VECTOR_ELT(obj, i), reps, N));
+      }
+      SEXP new_names = PROTECT(Rf_duplicate(Rf_getAttrib(obj, R_NamesSymbol)));
+      R_xlen_t last_i = Rf_xlength(new_names) - 1;
+      string ix_name = std::string(CHAR(STRING_ELT(new_names, last_i))) + "_term";
+      SET_STRING_ELT(new_names, last_i, Rf_mkCharCE(ix_name.c_str(), CE_UTF8));
+      set_df_attrs(df, new_names);
+      // for data.table and tible sake
+      Rf_setAttrib(df, R_ClassSymbol, Rf_getAttrib(obj, R_ClassSymbol));
+      UNPROTECT(2);
+      return df;
+    } else {
+      // obj is a primitive vector
+      SEXP df = PROTECT(Rf_allocVector(VECSXP, 2));
+      SET_VECTOR_ELT(df, 0, replicate_sexp(obj, reps, N));
+      set_df_attrs(df, CharacterVector::create("id", "term"));
+      UNPROTECT(1);
+      return df;
+    }
+  }
+
+  SEXP replicate_sexp(SEXP obj, const vector<int>& reps, R_xlen_t N) {
+    SEXP id = PROTECT(Rf_allocVector(TYPEOF(obj), N));
+    R_xlen_t CN = reps.size();
+    R_xlen_t oi = 0;
+    switch(TYPEOF(obj)) {
+     case STRSXP:
+       for (R_xlen_t i = 0; i < CN; i++) {
+         int r = reps[i];
+         SEXP nm = STRING_ELT(obj, i);
+         for (int rr = 0; rr < r; rr++) {
+           SET_STRING_ELT(id, oi, nm);
+           oi++;
+         }
+       };
+       break;
+     case LGLSXP:
+     case INTSXP: {
+       int* idpx = INTEGER(id);
+       int* nmpx = INTEGER(obj);
+       for (R_xlen_t i = 0; i < CN; i++) {
+         int r = reps[i];
+         int nm = nmpx[i];
+         for (int rr = 0; rr < r; rr++) {
+           idpx[oi] = nm;
+           oi++;
+         }
+       };
+       if (Rf_inherits(obj, "factor")) {
+         Rf_setAttrib(id, R_LevelsSymbol, Rf_getAttrib(obj, R_LevelsSymbol));
+       }
+     }; break;
+     case REALSXP: {
+       double* idpx = REAL(id);
+       double* nmpx = REAL(obj);
+       for (R_xlen_t i = 0; i < CN; i++) {
+         int r = reps[i];
+         double nm = nmpx[i];
+         for (int rr = 0; rr < r; rr++) {
+           idpx[oi] = nm;
+           oi++;
+         }
+       };
+     }; break;
+     default: Rf_error("Type '%s' is not supported for document ids", Rf_type2char(TYPEOF(obj)));
+    }
+    Rf_setAttrib(id, R_ClassSymbol, Rf_getAttrib(obj, R_ClassSymbol));
+    UNPROTECT(1);
+    return id;
+  }
+
   void push_ix_maybe(vector<int>& v, const string& term, bool keep_unknown, int nbuckets) {
-    shm_string_iter vit = vocabix.find(term);
+    hashmap_string_iter vit = vocabix.find(term);
     // this one is used for ixs for which 0 is special; thus +1
     int uoffset = static_cast<int>(vocab.size()) + 1;
     if (vit == vocabix.end()) {
@@ -496,7 +682,7 @@ class Vocab {
         } else {
           /* Rprintf("col:%d bkt:%d i:%d sofar[bkt]:%d\n", offset + bkt, bkt, i, sofar[bkt]); */
           col = col + embeddings(_, i);
-        }        
+        }
         sofar[bkt]++;
         if (sofar[bkt] == max_per_bucket) nfull--;
       }
@@ -509,22 +695,7 @@ class Vocab {
     }
   }
 
-  CharacterVector vocab_names(uint32_t nbuckets) {
-    CharacterVector out(vocab.size() + nbuckets);
-    size_t i = 0;
-    for (const VocabEntry& ve : vocab) {
-      out[i] = Rf_mkChar(ve.term.c_str());
-      i++;
-    }
-    string tmpname = "";
-    for (uint32_t bkt = 1; bkt <= nbuckets; bkt++) {
-      out[i] = bkt_name(bkt);
-      i++;
-    }
-    return out;
-  }
-
-  inline string bkt_name(uint32_t bkt) {
+ inline string bkt_name(uint32_t bkt) {
     return "__" + to_string(bkt);
   }
 

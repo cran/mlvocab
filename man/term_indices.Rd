@@ -2,31 +2,39 @@
 % Please edit documentation in R/term_indices.R
 \name{term_indices}
 \alias{term_indices}
-\alias{tiseq}
-\alias{term_indices}
-\alias{timat}
-\title{Convert text to integer indices}
+\alias{tix_seq}
+\alias{tix_df}
+\alias{tix_mat}
+\title{Term Indices: Convert text to integer indices}
 \usage{
-tiseq(corpus, vocab, keep_unknown = nbuckets > 0, nbuckets = attr(vocab,
-  "nbuckets"), reverse = FALSE)
+tix_seq(corpus, vocab, keep_unknown = nbuckets > 0,
+  nbuckets = attr(vocab, "nbuckets"), reverse = FALSE)
 
-timat(corpus, vocab, maxlen = 100, pad_right = TRUE, trunc_right = TRUE,
-  keep_unknown = nbuckets > 0, nbuckets = attr(vocab, "nbuckets"),
-  reverse = FALSE)
+tix_df(corpus, vocab, keep_unknown = nbuckets > 0,
+  nbuckets = attr(vocab, "nbuckets"), reverse = FALSE,
+  as_factor = FALSE)
+
+tix_mat(corpus, vocab, maxlen = 100, pad_right = TRUE,
+  trunc_right = TRUE, keep_unknown = nbuckets > 0,
+  nbuckets = attr(vocab, "nbuckets"), reverse = FALSE)
 }
 \arguments{
-\item{corpus}{text corpus}
+\item{corpus}{text corpus; see \code{\link[=vocab]{vocab()}}.}
 
-\item{vocab}{data frame produced by \code{\link[=vocab]{vocab()}} or \code{\link[=vocab_update]{vocab_update()}}}
+\item{vocab}{data frame produced by \code{\link[=vocab]{vocab()}} or \code{\link[=update_vocab]{update_vocab()}}}
 
 \item{keep_unknown}{logical. If \code{TRUE}, preserve unknowns in the output
-sequences.}
+sequences. When \code{nbuckets} == 0 then unknowns are indexed with 0.}
 
 \item{nbuckets}{integer. How many buckets to hash unknowns into.}
 
 \item{reverse}{logical. Should each sequence be reversed in the final
 output? Reversion happens after \code{pad_right} and \code{trunc_right} have been
 applied to the original text sequence. Default \code{FALSE}.}
+
+\item{as_factor}{if TRUE, the returned index column will be a factor instead
+of an integer vector. Will throw an error when \code{keep_unknown} is TRUE and
+\code{nbuckets} == 0.}
 
 \item{maxlen}{integer. Maximum length of each sequence.}
 
@@ -37,27 +45,30 @@ sequences happen on the right? Default \code{TRUE}.}
 sequences happen on the right? Default \code{TRUE}.}
 }
 \value{
-\code{\link[=tiseq]{tiseq()}} returns a list of integer vectors, \code{\link[=timat]{timat()}} returns an
-integer matrix, one row per sequence.
+\code{\link[=tix_seq]{tix_seq()}} returns a list of integer vectors, \code{\link[=tix_df]{tix_df()}} produces a
+flat index \code{\link[=data.frame]{data.frame()}} with two columns, \code{\link[=tix_mat]{tix_mat()}} returns an integer
+matrix, one row per sequence.
 }
 \description{
-Convert text to integer indices
+Term Indices: Convert text to integer indices
 }
 \examples{
-corpus <- list(a = c("The", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog"), 
+
+corpus <- list(a = c("The", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog"),
                b = c("the", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog",
                      "the", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog"))
 v <- vocab(corpus["b"]) # "The" is unknown
 v
-tiseq(corpus, v)
-tiseq(corpus, v, keep_unknown = TRUE)
-tiseq(corpus, v, nbuckets = 1)
-tiseq(corpus, v, nbuckets = 3)
 
-timat(corpus, v, maxlen = 12)
-timat(corpus, v, maxlen = 12, keep_unknown = TRUE)
-timat(corpus, v, maxlen = 12, nbuckets = 1)
-timat(corpus, v, maxlen = 12, nbuckets = 1, reverse = TRUE)
-timat(corpus, v, maxlen = 12, pad_right = FALSE, nbuckets = 1)
-timat(corpus, v, maxlen = 12, trunc_right = FALSE, nbuckets = 1)
+tix_seq(corpus, v)
+tix_seq(corpus, v, keep_unknown = TRUE)
+tix_seq(corpus, v, nbuckets = 1)
+tix_seq(corpus, v, nbuckets = 3)
+
+tix_mat(corpus, v, maxlen = 12)
+tix_mat(corpus, v, maxlen = 12, keep_unknown = TRUE)
+tix_mat(corpus, v, maxlen = 12, nbuckets = 1)
+tix_mat(corpus, v, maxlen = 12, nbuckets = 1, reverse = TRUE)
+tix_mat(corpus, v, maxlen = 12, pad_right = FALSE, nbuckets = 1)
+tix_mat(corpus, v, maxlen = 12, trunc_right = FALSE, nbuckets = 1)
 }

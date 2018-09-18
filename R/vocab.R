@@ -1,7 +1,7 @@
 
 `_empty_vocab` <- structure(data.frame(term = character(), term_count = integer(), doc_count = integer(), stringsAsFactors = F),
                             document_count = 0L,
-                            nbuckets = 0L, 
+                            nbuckets = 0L,
                             ngram_sep = "_",
                             ngram = c(1L, 1L))
 
@@ -12,15 +12,37 @@
 
 ##' Build and manipulate vocabularies
 ##'
-##' [vocab()] creates a vocabulry from a text corpus; [vocab_update()] and
-##' [vocab_prune()], respectively,  update and prune an existing vocabulary.
-##' @param corpus list of character vectors
+##' [vocab()] creates a vocabulary from a text corpus; [update_vocab()] and
+##' [prune_vocab()] update and prune an existing vocabulary respectively.
+##'
+##' When `corpus` is a character vector each string is tokenized with `regex`
+##' with the internal tokenizer. When `corpus` has names, names will be used to
+##' name the output whenever appropriate.
+##'
+##' When corpus is a `data.frame`, the documents must be in last column,  which
+##' can be either a list of strings or a character vector. All other columns are
+##' considered document ids. If first column is a character vector most function
+##' will use it to name the output.
+##'
+##' @param corpus A collection of ASCII or UTF-8 encoded documents. It can be a
+##'   list of character vectors, a character vector or a data.frame with at
+##'   least two columns - id and documents. See details.
 ##' @param ngram a vector of length 2 of the form `c(min_ngram, max_ngram)` or a
 ##'   singleton `max_ngram` which is equivalent to `c(1L, max_ngram)`.
 ##' @param ngram_sep separator to link terms within ngrams.
+##' @param regex a regexp to be used for segmentation of documents when `corpus`
+##'   is a character vector; ignored otherwise. Defaults to a set of basic white
+##'   space separators. `NULL` means no segmentation. The regexp grammar is the
+##'   extended ECMAScript as implemented in C++11.
+##'
+##' @references
+##'
+##' https://en.cppreference.com/w/cpp/regex/ecmascript
+##'
 ##' @examples
+##'
 ##' corpus <-
-##'    list(a = c("The", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog"), 
+##'    list(a = c("The", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog"),
 ##'         b = c("the", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog",
 ##'               "the", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog"))
 ##'
@@ -31,43 +53,33 @@
 ##' v <- vocab(corpus)
 ##'
 ##' extra_corpus <- list(extras = c("apples", "oranges"))
-##' v <- vocab_update(v, extra_corpus)
+##' v <- update_vocab(v, extra_corpus)
 ##' v
 ##'
-##' vocab_prune(v, max_terms = 7)
-##' vocab_prune(v, term_count_min = 2)
-##' vocab_prune(v, max_terms = 7, nbuckets = 2)
+##' prune_vocab(v, max_terms = 7)
+##' prune_vocab(v, term_count_min = 2)
+##' prune_vocab(v, max_terms = 7, nbuckets = 2)
 ##'
-##' v2 <- vocab_prune(v, max_terms = 7, nbuckets = 2)
-##' enames <- c("the", "quick", "brown", "fox", "jumps")
-##' emat <- matrix(rnorm(50), nrow = 5,
-##'                dimnames = list(enames, NULL))
-##'
-##' vocab_embed(v2, emat)
-##' vocab_embed(v2, t(emat)) # automatic detection of the orientation
-##'
-##' vembs <- vocab_embed(v2, emat)
-##' all(vembs[enames, ] == emat[enames, ])
 ##' @export
-vocab <- function(corpus, ngram = c(1, 1), ngram_sep = "_") {
+vocab <- function(corpus, ngram = c(1, 1), ngram_sep = "_", regex = "[[:space:]]+") {
   old_vocab <- structure(`_empty_vocab`,
                          ngram = .normalize_ngram(ngram),
-                         ngram_sep = ngram_sep)
+                         ngram_sep = ngram_sep,
+                         regex = regex)
   C_vocab(corpus, old_vocab)
 }
 
 ##' @param vocab `data.frame` obtained from a call to [vocab()].
 ##' @name vocab
 ##' @export
-vocab_update <- function(vocab, corpus) {
+update_vocab <- function(vocab, corpus) {
   if (!inherits(vocab, "mlvocab_vocab"))
     stop("'vocab' must be of class 'mlvocab_vocab'")
-  pruned <- attr(vocab, "pruned")
   if (isTRUE(attr(vocab, "pruned"))) {
+    ## Updating would makes sense if nbuckets > 0 but original prune criteria
+    ## will be violated. So it doesn't seem worth supporting.
     stop("Cannot update pruned vocabulary")
   }
-  ## if (isTRUE(attr(vocab, "chargram", F)))
-  ##     attr(vocab, "chargram") <- FALSE
   C_vocab(corpus, vocab)
 }
 
@@ -80,14 +92,14 @@ vocab_update <- function(vocab, corpus) {
 ##'   this many docs
 ##' @param doc_count_max,doc_proportion_max keep terms appearing in at _most_
 ##'   this many docs
-##' @param nbuckets How many unknown buckets to create along the
-##'   remaining terms of the pruned `vocab`. All pruned terms will be hashed
-##'   into this many buckets and the corresponding statistics (`term_count` and
-##'   `doc_count`) updated.
+##' @param nbuckets How many unknown buckets to create along the remaining terms
+##'   of the pruned `vocab`. All pruned terms will be hashed into this many
+##'   buckets and the corresponding statistics (`term_count` and `doc_count`)
+##'   updated.
 ##' @name vocab
 ##' @export
-vocab_prune <- function(vocab,
-                        max_terms = Inf, 
+prune_vocab <- function(vocab,
+                        max_terms = Inf,
                         term_count_min = 1L,
                         term_count_max = Inf,
                         doc_proportion_min = 0.0,
@@ -96,8 +108,8 @@ vocab_prune <- function(vocab,
                         doc_count_max = Inf,
                         nbuckets = attr(vocab, "nbuckets")) {
 
-  ## adapted from [text2vec::vocab_pruneulary()]
-  
+  ## adapted from [text2vec::prune_vocabulary()]
+
   if (!inherits(vocab, "mlvocab_vocab"))
     stop("'vocab' must be an object of class `mlvocab_vocab`")
 
@@ -152,57 +164,17 @@ vocab_prune <- function(vocab,
   pruned
 }
 
-##' @description [vocab_embed()] subsets a (commonly large) pre-trained
-##'   word-vector matrix into a smaller, one vector per term, embedding
-##'   matrix.
-##'
-##' [vocab_embed()] is commonly used in conjunction with sequence generators
-##' ([timat()] and [tiseq()]). When a term in a corpus is not present in a
-##' vocabulary (aka unknown), it is hashed into one of the `nbuckets`
-##' buckets. Embeddings which are hashed into same bucket are averaged to
-##' produce the embedding for that bucket. Maximum number of embeddings to
-##' average per bucket is controled with `max_in_bucket` parameter.
-##'
-##' Similarly, when a term from the vocabulary is not present in the embedding
-##' matrix (aka missing) `max_in_bucket` embeddings are averaged to produce the
-##' missing embedding. Different buckets are used for "missing" and "unknown"
-##' embeddings because `nbuckets` can be 0.
-##' 
-##' @param embeddings embeddings matrix. The terms dimension must be named. If
-##'   both [colnames()] and [rownames()] are non-null, dimension with more
-##'   elements is considered term-dimension.
-##' @param max_in_bucket At most this many embedding vectors will be averaged
-##'   into each unknown or missing bucket (see details). Lower number results in
-##'   faster processing. For large `nbuckets` this number might not be
-##'   reached due to the finiteness of the `embeddings` vocabulary, or even
-##'   result in `0` embeddings being hashed into a bucket producing `[0 0 ...]`
-##'   embeddings for some buckets.
-##' @name vocab
-##' @export
-vocab_embed <- function(vocab, embeddings,
-                        nbuckets = attr(vocab, "nbuckets"),
-                        max_in_bucket = 30) {
-  if (is.null(colnames(embeddings)) && is.null(rownames(embeddings)))
-    stop("Terms dimension of `embeddings` must be named")
-  by_row <-
-    if (!is.null(rownames(embeddings)))
-      is.null(colnames(embeddings)) || nrow(embeddings) > ncol(embeddings)
-  else FALSE
-  out <- C_embed_vocab(vocab, embeddings, by_row, nbuckets, max_in_bucket)
-  out
-}
-
 
 ### OTHER STUFF
 
-## mlvocab <- function(x = identity, corpus_var, ngram = c(1, 1), 
+## mlvocab <- function(x = identity, corpus_var, ngram = c(1, 1),
 ##                     vocab_name = corpus_var, ...) {
 ##   if (is.function(x))
 ##     return(mlfunction("mlvocab"))
 ##   mlcontinue(switch(x$op,
 ##                     describe = assoc(x, c("describe", "mlvocab"),
-##                                      ll(doc = "Compute vocabulary from `vocab_corpus`.", 
-##                                         handles = c("run", "describe"))), 
+##                                      ll(doc = "Compute vocabulary from `vocab_corpus`.",
+##                                         handles = c("run", "describe"))),
 ##                     run =
 ##                       assoc(x, c("vocab", vocab_name), {
 ##                         old_vocab <- x[["vocab"]][[vocab_name]]
@@ -210,8 +182,8 @@ vocab_embed <- function(vocab, embeddings,
 ##                         if (is.null(old_vocab))
 ##                           vocab(corpus = corpus, ngram = ngram)
 ##                         else
-##                           vocab_update(old_vocab, corpus)
-##                       }), 
+##                           update_vocab(old_vocab, corpus)
+##                       }),
 ##                     x))
 ## }
 
@@ -220,7 +192,7 @@ vocab_embed <- function(vocab, embeddings,
 print.mlvocab_vocab <- function(x, ...) {
   cat("Number of docs: ", attr(x, "document_count", TRUE), "\n",
       "Ngrams: ", paste(attr(x, "ngram", TRUE), collapse = " "), "\n",
-      "Buckets: ", attr(x, "nbuckets"), "\n", 
+      "Buckets: ", attr(x, "nbuckets"), "\n",
       if (isTRUE(attr(x, "pruned", TRUE))) "Pruned vocabulary:" else "Vocabulary", "\n",
       sep = "")
   newx <- x

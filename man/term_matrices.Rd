@@ -3,32 +3,31 @@
 \name{term_matrices}
 \alias{term_matrices}
 \alias{dtm}
-\alias{term_matrices}
 \alias{tdm}
-\alias{term_matrices}
 \alias{tcm}
 \title{Term-document and term-cooccurrence matrices}
 \usage{
 dtm(corpus, vocab = NULL, ngram = attr(vocab, "ngram"),
-  nbuckets = attr(vocab, "nbuckets"), output = c("triplet", "column", "row",
-  "df"))
+  nbuckets = attr(vocab, "nbuckets"), output = c("row", "triplet",
+  "column", "df"))
 
 tdm(corpus, vocab = NULL, ngram = attr(vocab, "ngram"),
-  nbuckets = attr(vocab, "nbuckets"), output = c("triplet", "column", "row",
-  "df"))
+  nbuckets = attr(vocab, "nbuckets"), output = c("column", "triplet",
+  "row", "df"))
 
 tcm(corpus, vocab = NULL, window_size = 5,
-  window_weights = 1/seq.int(window_size), context = c("symmetric", "right",
-  "left"), ngram = attr(vocab, "ngram"), nbuckets = attr(vocab, "nbuckets"),
-  output = c("triplet", "column", "row", "df"))
+  window_weights = 1/seq.int(window_size), context = c("symmetric",
+  "right", "left"), ngram = attr(vocab, "ngram"),
+  nbuckets = attr(vocab, "nbuckets"), output = c("triplet", "column",
+  "row", "df"))
 }
 \arguments{
-\item{corpus}{a list of character vectors}
+\item{corpus}{text corpus; see \code{[vocab()]}.}
 
 \item{vocab}{a \code{data.frame} produced by an early call to \code{\link[=vocab]{vocab()}}. When
-\code{vocab} is \code{NULL} and \code{nbuckets} is \code{NULL} or \code{0}, the vocabulary
-is first computed from corpus. When \code{nbuckets} > \code{0} and \code{vocab} is
-\code{NULL} the result matrix will consist of buckets only.}
+\code{vocab} is \code{NULL} and \code{nbuckets} is \code{NULL} or \code{0}, the vocabulary is first
+computed from corpus. When \code{nbuckets} > \code{0} and \code{vocab} is \code{NULL} the
+result matrix will consist of buckets only.}
 
 \item{ngram}{an integer vector of the form \code{[ngram_min, ngram_max]}. Defaults to the \code{ngram} settings used during the creation of
 \code{vocab}. Explicitly providing this parameter should rarely be needed.}
@@ -37,7 +36,15 @@ is first computed from corpus. When \code{nbuckets} > \code{0} and \code{vocab} 
 
 \item{output}{one of "triplet", "column", "row", "df" or an unambiguous
 abbreviation thereof. First three options return the corresponding sparse
-matrices from Matrix package, "df" results in a triplet \code{data.frame}.}
+matrices from Matrix package, "df" results in a triplet
+\code{data.frame}.
+
+The default output type corresponds to the most efficient computation in
+terms of CPU and memory usage ("row" for \code{dtm}, "column" for \code{tdm} and
+"triplet" for \code{tcm}), but benefits are marginal unless your matrices are
+so big that they barely fit into memory. If you plan to further perform
+matrix algebra on these matrices it's a good idea to choose "column" type
+because of the much better support from the Matrix package.}
 
 \item{window_size}{sliding window size used for co-occurrence
 computation. In this implementation the window includes the context word;
@@ -47,9 +54,9 @@ of \code{ngram_min} and \code{ngram_max}.}
 
 \item{window_weights}{vector of weights which are superimposed on the
 sliding \code{window}. First element is a weight for distance 0 (aka context
-word itself),  second for distance 1 etc. First weight doesn't play any
-role for \code{ngram_max} == 1, see details. \code{window_weights} is recycled to
-length \code{window_size} if needed. It can be a string naming a function or a
+word itself),  second for distance 1 etc. First weight is ignored for
+\code{ngram_max} == 1, see details. \code{window_weights} is recycled to length
+\code{window_size} if needed. It can be a string naming a function or a
 function which accepts one argument, \code{window_size},  and returns a
 \code{window_weights} vector. Defaults to \code{[1, 1/2, ..., 1/window_size]}.}
 
@@ -61,20 +68,31 @@ term \code{j} on the right side of \code{i}. When "left", entry \code{(i, j) rep
 \description{
 These functions compute or update various term-counts of a corpus with flexible output
 specification.
+}
+\details{
+For \code{ngram_max > 1} the weights vectors is automatically extended to match
+the "imaginary" sliding window over the ngrams. A proximity weight attached
+for an n-gram is an average of weights of the constituents of the ngram in
+the original sequence. Such scheme results in a consistent weighting across
+different values of \code{ngram_min} and \code{ngram_max}, and it is the reason why
+first element of \code{window_weights} is the proximity to the context word
+itself (i.e. distance \code{0}). For example:
 
 \itemize{
 \item default weights for the context window \code{["a" "b" "c" "d" "e"]}
-a    b    c    d    e
-1.00 0.50 0.33 0.25 0.20
+\tabular{rrrrr}{
+a\tab b\tab c\tab d\tab e\cr
+1.00\tab 0.50\tab 0.33\tab 0.25\tab 0.20
 }
-}
-\details{
-\itemize{
 \item for \code{ngram=c(1L, 3L)}
-a   a_b a_b_c     b   b_c b_c_d     c   c_d c_d_e     d   d_e     e
-1.00  0.75  0.61  0.50  0.42  0.36  0.33  0.29  0.26  0.25  0.22  0.20
+\tabular{rrrrrrrrrrrr}{
+a \tab a_b \tab a_b_c \tab b \tab b_c \tab b_c_d \tab c \tab c_d \tab c_d_e \tab d \tab d_e \tab e \cr
+1.00\tab 0.75\tab 0.61\tab 0.50\tab 0.42\tab 0.36\tab 0.33\tab 0.29\tab 0.26\tab 0.25\tab 0.22\tab 0.20 \cr
+}
 \item for \code{ngram=c(2L, 3L)}
-a_b a_b_c   b_c b_c_d   c_d c_d_e   d_e
-0.75  0.61  0.42  0.36  0.29  0.26  0.22
+\tabular{rrrrrrr}{
+a_b \tab a_b_c \tab b_c \tab b_c_d \tab c_d \tab c_d_e \tab d_e \cr
+0.75\tab 0.61\tab 0.42\tab 0.36\tab 0.29\tab 0.26\tab 0.22
+}
 }
 }

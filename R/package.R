@@ -2,7 +2,7 @@
 ##'
 ##' The following two-step abstraction is provided by the `mlvocab`
 ##' package. First, the vocabulary object is built from the entire corpus with
-##' the help of [vocab()], [vocab_update()] and [vocab_prune()]
+##' the help of [vocab()], [update_vocab()] and [prune_vocab()]
 ##' functions. Second, the vocabulary is passed alongside the corpus to a
 ##' variety of corpus pre-processing functions.
 ##'
@@ -13,13 +13,13 @@
 ##' 
 ##' \itemize{
 ##'
-##' \item{term index sequences}{[tiseq()] and [timat()] produce integer
+##' \item{term index sequences}{[tix_seq()] and [tix_mat()] produce integer
 ##'   sequences suitable for direct consumption by various sequence models.}
 ##'
 ##' \item{term matrices}{[dtm()], [tdm()] and [tcm()] create document-term,
 ##' term-document and term-co-occurrence matrices respectively.}
 ##'
-##' \item{vocabulary embedding}{given pre-trained word-vectors [vocab_embed()]
+##' \item{vocabulary embedding}{given pre-trained word-vectors [prune_embeddings()]
 ##' creates smaller embedding matrices treating missing and unknown vocabulary
 ##' terms with grace.}
 ##'
@@ -30,10 +30,11 @@
 ##' }
 ##'
 ##' @author Vitalie Spinu (\email{spinuvit@gmail.com})
+##' @import sparsepp
 ##' @importFrom digest digest
 ##' @importFrom Rcpp sourceCpp
 ##' @importFrom Matrix Diagonal t rowSums colSums
+##' @importFrom methods new
 ##' @importFrom utils head tail
 ##' @useDynLib mlvocab, .registration=TRUE
-##' @keywords internal
 "_PACKAGE"

@@ -1,5 +1,5 @@
 
- 
+
 #ifndef MLVOCAB_TRIPLET_MATRIX_H
 #define MLVOCAB_TRIPLET_MATRIX_H
 
@@ -10,10 +10,10 @@ class TripletMatrix {
 
  public:
 
-  // for Matrix compatibility 
   int nrow;
   int ncol;
-  sparse_hash_map<uint_fast64_t, double>  vals;
+
+  hashmap<uint_fast64_t, double> vals;
 
   TripletMatrix():
     nrow(0), ncol(0) {};
@@ -35,7 +35,7 @@ class TripletMatrix {
   size_t size() {
     return(vals.size());
   }
-  
+
   void clear() {
     vals.clear();
   };
@@ -49,7 +49,6 @@ class TripletMatrix {
            Nullable<const CharacterVector&> inames,
            Nullable<const CharacterVector&> jnames,
            bool symmetric = false) {
-
     switch(mattype) {
      case MatrixType::DGT:
        return dTMatrix(inames, jnames, symmetric);
@@ -64,21 +63,21 @@ class TripletMatrix {
 
   // col/row-wise multiplication
   void apply_weight(const NumericVector& weights, const MatrixDimType across) {
-    if (across == MatrixDimType::COL || across == MatrixDimType::BOTH) {
-      if (ncol > static_cast<int>(weights.size()))
-        Rf_error("Insufficient weights size (%d); ncol = %d", weights.size(), ncol);
-    }
-    if (across == MatrixDimType::ROW || across == MatrixDimType::BOTH) {
+    if (across == MatrixDimType::PRIMARY || across == MatrixDimType::BOTH) {
       if (nrow > static_cast<int>(weights.size()))
         Rf_error("Insufficient weights size (%d); nrow = %d", weights.size(), nrow);
     }
-    
-    if (across == MatrixDimType::ROW)
+    if (across == MatrixDimType::SECONDARY || across == MatrixDimType::BOTH) {
+      if (ncol > static_cast<int>(weights.size()))
+        Rf_error("Insufficient weights size (%d); nrow = %d", weights.size(), ncol);
+    }
+
+    if (across == MatrixDimType::PRIMARY)
       for (auto& v : vals) {
         int rix = first32(v.first);
         v.second *= weights[rix];
       }
-    else if (across == MatrixDimType::COL)
+    else if (across == MatrixDimType::SECONDARY)
       for (auto& v : vals) {
         int cix = second32(v.first);
         v.second *= weights[cix];
@@ -91,12 +90,12 @@ class TripletMatrix {
       }
   }
 
-  
+
  private:
 
   
   // LOW/HIGH bits of the hash key
-  
+
   inline uint_fast64_t to64(uint32_t i, uint32_t j) {
     return(static_cast<uint_fast64_t>(i) << 32 | j);
   }
@@ -112,18 +111,18 @@ class TripletMatrix {
 
   
   // EXPORT FUNCTIONS
-  
+
   S4 dTMatrix(Nullable<const CharacterVector&> rownames,
               Nullable<const CharacterVector&> colnames,
               bool symmetric) {
 
     int nrow = std::max(this->nrow, rownames.isNull() ? 0 : LENGTH(rownames.get()));
     int ncol = std::max(this->ncol, colnames.isNull() ? 0 : LENGTH(colnames.get()));
-    
+
     size_t nnz = size();
     IntegerVector I(nnz), J(nnz);
     NumericVector X(nnz);
-    
+
     size_t i = 0;
     for(const auto& v : vals) {
       I[i] = first32(v.first);
@@ -149,7 +148,7 @@ class TripletMatrix {
               bool C, bool symmetric) {
 
     // see the doc entry CsparseMatrix for internals of dgCMatrix
-    
+
     int nrow = std::max(this->nrow, rownames.isNull() ? 0 : LENGTH(rownames.get()));
     int ncol = std::max(this->ncol, colnames.isNull() ? 0 : LENGTH(colnames.get()));
 
@@ -157,7 +156,7 @@ class TripletMatrix {
 
     int psize = jsize + 1;
     IntegerVector P(psize);
-     
+
     size_t nnz = size();
     vector<vector<int>> vvi(jsize);
     vector<vector<double>> vvx(jsize);
@@ -197,26 +196,6 @@ class TripletMatrix {
     return out;
   }
 
-  
-  // SORT TWO VECTORS SIMULTANEOUSLY
-  // adapted from http://stackoverflow.com/a/17074810/453735
-  template <typename T>
-  std::vector<size_t> sorting_permutation(const vector<T>& v) {
-    std::vector<size_t> p(v.size());
-    std::iota(p.begin(), p.end(), 0);
-    std::sort(p.begin(), p.end(),
-              [&](size_t i, size_t j){ return v[i] < v[j]; });
-    return p;
-  }
-
-  template <typename T>
-  std::vector<T> apply_permutation(const std::vector<T>& vec, const std::vector<std::size_t>& p) {
-    std::vector<T> sorted_vec(vec.size());
-    std::transform(p.begin(), p.end(), sorted_vec.begin(),
-                   [&](std::size_t i){ return vec[i]; });
-    return sorted_vec;
-  }
-  
 };
 
 
